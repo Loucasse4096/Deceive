@@ -1,8 +1,6 @@
-﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
+// Deceive macOS port — original project by molenzwiebel (github.com/molenzwiebel/Deceive), GPL-3.0.
+using System;
 using System.Diagnostics;
-using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -11,10 +9,15 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
-using System.Windows.Forms;
+using Deceive.Platform;
 
 namespace Deceive;
 
+/// <summary>
+///     Portable helpers. Everything here uses cross-platform .NET APIs (HttpClient, Dns,
+///     X509Certificate2). OS-specific behaviour is delegated to <see cref="IPlatform" /> and all
+///     user interaction goes through <see cref="IUserInterface" />.
+/// </summary>
 internal static class Utils
 {
     internal static string DeceiveVersion
@@ -28,11 +31,11 @@ internal static class Utils
         }
     }
 
-    /**
-     * Asynchronously checks if the current version of Deceive is the latest version.
-     * If not, and the user has not dismissed the message before, an alert is shown.
-     */
-    public static async Task CheckForUpdatesAsync()
+    /// <summary>
+    ///     Asynchronously checks if the current version of Deceive is the latest version.
+    ///     If not, and the user has not dismissed the message before, an alert is shown.
+    /// </summary>
+    public static async Task CheckForUpdatesAsync(IUserInterface ui)
     {
         try
         {
@@ -64,19 +67,13 @@ internal static class Utils
             // Show a message and record the latest shown.
             Persistence.SetPromptedUpdateVersion(latestVersion);
 
-            var result = MessageBox.Show(
+            var openDownload = await ui.ShowOkCancelAsync(
                 $"There is a new version of Deceive available: {latestVersion}. You are currently using Deceive {DeceiveVersion}. " +
                 "Deceive updates usually fix critical bugs or adapt to changes by Riot, so it is recommended that you install the latest version.\n\n" +
-                "Press OK to visit the download page, or press Cancel to continue. Don't worry, we won't bother you with this message again if you press cancel.",
-                StartupHandler.DeceiveTitle,
-                MessageBoxButtons.OKCancel,
-                MessageBoxIcon.Information,
-                MessageBoxDefaultButton.Button1
-            );
+                "Press OK to visit the download page, or press Cancel to continue. Don't worry, we won't bother you with this message again if you press cancel.");
 
-            if (result is DialogResult.OK)
-                // Open the url in the browser.
-                Process.Start(release?["html_url"]?.ToString()!);
+            if (openDownload)
+                ui.OpenUrl(release?["html_url"]?.ToString() ?? "https://github.com/molenzwiebel/Deceive/releases/latest");
         }
         catch
         {
@@ -84,87 +81,16 @@ internal static class Utils
         }
     }
 
-    private static IEnumerable<Process> GetProcesses()
-    {
-        var riotCandidates = Process.GetProcessesByName(Process.GetCurrentProcess().ProcessName)
-            .Where(process => process.Id != Process.GetCurrentProcess().Id).ToList();
-        riotCandidates.AddRange(Process.GetProcessesByName("LeagueClient"));
-        riotCandidates.AddRange(Process.GetProcessesByName("LoR"));
-        riotCandidates.AddRange(Process.GetProcessesByName("VALORANT-Win64-Shipping"));
-        riotCandidates.AddRange(Process.GetProcessesByName("RiotClientServices"));
-        return riotCandidates;
-    }
-
-    // Return the currently running Riot Client process, or null if none are running.
-    public static Process? GetRiotClientProcess() => Process.GetProcessesByName("RiotClientServices").FirstOrDefault();
-
-    // Checks if there is a running LCU/LoR/VALORANT/RC or Deceive instance.
-    public static bool IsClientRunning() => GetProcesses().Any();
-
-    // Kills the running LCU/LoR/VALORANT/RC or Deceive instance, if applicable.
-    public static void KillProcesses()
-    {
-        try
-        {
-            foreach (var process in GetProcesses())
-            {
-                process.Refresh();
-                if (process.HasExited)
-                    continue;
-                process.Kill();
-                process.WaitForExit();
-            }
-        }
-        catch (Win32Exception ex)
-        {
-            // thank you C# and your horrible win32 ecosystem integration, I have no clue if this is correct
-            if (ex.NativeErrorCode == -2147467259 || ex.ErrorCode == -2147467259 || ex.ErrorCode == 5 ||
-                ex.NativeErrorCode == 5)
-            {
-                // ERROR_ACCESS_DENIED
-                MessageBox.Show(
-                    "Deceive could not stop existing Riot processes because it does not have the right permissions. Please relaunch this application as an administrator and try again.",
-                    StartupHandler.DeceiveTitle,
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error,
-                    MessageBoxDefaultButton.Button1
-                );
-                Environment.Exit(0);
-            }
-
-            throw ex;
-        }
-    }
-
-    // Checks for any installed Riot Client configuration,
-    // and returns the path of the client if it does. Else, returns null.
-    public static string? GetRiotClientPath()
-    {
-        // Find the RiotClientInstalls file.
-        var installPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "Riot Games/RiotClientInstalls.json");
-        if (!File.Exists(installPath))
-            return null;
-
-        try
-        {
-            // occasionally this deserialization may error, because the RC occasionally corrupts its own
-            // configuration file (wtf riot?). we will return null in that case, which will cause a prompt
-            // telling the user to launch a game normally once
-            var data = JsonSerializer.Deserialize<JsonNode>(File.ReadAllText(installPath));
-            var rcPaths = new List<string?>
-                { data?["rc_default"]?.ToString(), data?["rc_live"]?.ToString(), data?["rc_beta"]?.ToString() };
-
-            return rcPaths.FirstOrDefault(File.Exists);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    // Returns a certificate for deceive-localhost.molenzwiebel.xyz, either from cache or by downloading
-    // the current one from the server. The returned certificate will be valid for at least 20 days.
+    /// <summary>
+    ///     Returns a certificate for deceive-localhost.molenzwiebel.xyz, either from cache or by
+    ///     downloading the current one from the server. The returned certificate is valid for at
+    ///     least 20 days.
+    ///
+    ///     This mechanism is unchanged from the Windows version: Deceive downloads a pre-signed PFX
+    ///     whose chain the Riot Client already trusts, which works identically on macOS. (Generating
+    ///     a self-signed cert on the fly via CertificateRequest is possible but would require the
+    ///     Riot Client to trust it, so we keep the original approach.)
+    /// </summary>
     public static async Task<X509Certificate2?> GetProxyCertificateAsync()
     {
         var cachedCert = Persistence.GetCachedCertificate();
@@ -210,26 +136,37 @@ internal static class Utils
         return false;
     }
 
-    // Check if deceive-localhost.molenzwiebel.xyz is resolving to 127.0.0.1, and offer
-    // the user to relaunch to install the necessary hosts file entry if not.
-    public static void EnsureLocalhostResolution()
+    /// <summary>
+    ///     Checks if deceive-localhost.molenzwiebel.xyz resolves to 127.0.0.1. If not, offers to add
+    ///     the entry to /etc/hosts (with macOS privilege elevation) or to open the FAQ. Returns
+    ///     <c>true</c> if resolution works (or was fixed), <c>false</c> if Deceive should abort.
+    /// </summary>
+    public static async Task<bool> EnsureLocalhostResolutionAsync(IPlatform platform, IUserInterface ui)
     {
         if (DeceiveLocalhostResolves())
-            return;
+            return true;
 
-        var result = MessageBox.Show(
-            "Your machine is failing to resolve some required domains. You will need to switch DNS servers or add an entry to your hosts file. Please see the Deceive FAQ for more information. Deceive will not work until this issue is resolved. Would you like to open the FAQ now?",
-            StartupHandler.DeceiveTitle,
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question,
-            MessageBoxDefaultButton.Button1
-        );
+        // On macOS we can offer to fix this automatically by editing /etc/hosts (requires the admin
+        // password prompt). This replaces the Windows version which only pointed users at the FAQ.
+        var fixNow = await ui.ShowYesNoAsync(
+            "Your machine is failing to resolve a required domain (" + ConfigProxy.LocalhostDomain + " must point to 127.0.0.1). " +
+            "Deceive can add this entry to your /etc/hosts file for you — this requires your administrator password. " +
+            "\n\nWould you like Deceive to add the entry now? (Choose No to instead see the FAQ, which also explains the alternative of switching your DNS to 1.1.1.1 or 8.8.8.8.)");
 
-        if (result is DialogResult.Yes)
+        if (fixNow)
         {
-            Process.Start("https://github.com/molenzwiebel/Deceive#FAQ");
+            var added = await platform.TryAddHostsEntryAsync(ConfigProxy.LocalhostDomain);
+            if (added && DeceiveLocalhostResolves())
+                return true;
+
+            await ui.ShowErrorAsync(
+                "Deceive was unable to update your hosts file (the change was cancelled or did not take effect). " +
+                "Please add the entry manually, or switch your DNS to 1.1.1.1 / 8.8.8.8. See the FAQ for details.");
+            ui.OpenUrl("https://github.com/molenzwiebel/Deceive#FAQ");
+            return false;
         }
 
-        Environment.Exit(0);
+        ui.OpenUrl("https://github.com/molenzwiebel/Deceive#FAQ");
+        return false;
     }
 }
