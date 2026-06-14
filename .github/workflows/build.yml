@@ -1,25 +1,39 @@
-name: Windows Build (.NET Framework 4.7.2)
+name: macOS Build (.NET 8 / Avalonia)
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, "claude/**" ]
   pull_request:
     branches: [ master ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: macos-14 # Apple Silicon runner
+
+    strategy:
+      matrix:
+        rid: [ osx-arm64, osx-x64 ]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
-      - name: Restore NuGet packages
-        run: nuget restore Deceive.sln
+      - name: Build .app bundle (${{ matrix.rid }})
+        run: RID=${{ matrix.rid }} ./build-macos.sh
 
-      - name: Build solution
-        run: msbuild Deceive.sln /p:Configuration=Release
+      - name: Zip bundle
+        run: |
+          cd artifacts
+          ditto -c -k --sequesterRsrc --keepParent Deceive.app "Deceive-${{ matrix.rid }}.app.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Deceive-${{ matrix.rid }}
+          path: artifacts/Deceive-${{ matrix.rid }}.app.zip
